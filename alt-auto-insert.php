@@ -3,7 +3,7 @@
  * Plugin Name: alt自動挿入
  * Plugin URI: https://github.com/TaniyanR/alt-auto-insert
  * Description: WordPressの記事に挿入した画像のalt属性へ、記事タイトルを自動で設定する軽量プラグインです。
- * Version: 1.0.0
+ * Version: 1.1.0
  * Author: TaniyanR
  * Requires at least: 6.2
  * Requires PHP: 7.4
@@ -18,14 +18,16 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 final class Alt_Auto_Insert {
 	const OPTION_NAME = 'alt_auto_insert_settings';
-	const VERSION     = '1.0.0';
+	const VERSION     = '1.1.0';
 
 	/**
 	 * Boot plugin hooks.
 	 */
 	public static function init() {
 		add_filter( 'wp_insert_post_data', array( __CLASS__, 'filter_post_data' ), 20, 2 );
+		add_filter( 'image_send_to_editor', array( __CLASS__, 'filter_classic_editor_image' ), 20, 8 );
 		add_filter( 'post_thumbnail_html', array( __CLASS__, 'filter_post_thumbnail_html' ), 20, 5 );
+		add_action( 'enqueue_block_editor_assets', array( __CLASS__, 'enqueue_block_editor_assets' ) );
 		add_action( 'admin_menu', array( __CLASS__, 'add_settings_page' ) );
 		add_action( 'admin_init', array( __CLASS__, 'register_settings' ) );
 		add_filter( 'plugin_action_links_' . plugin_basename( __FILE__ ), array( __CLASS__, 'add_settings_link' ) );
@@ -47,9 +49,9 @@ final class Alt_Auto_Insert {
 	 */
 	private static function get_defaults() {
 		return array(
-			'post_types'       => array( 'post', 'page' ),
-			'content_images'   => 1,
-			'featured_images'  => 1,
+			'post_types'      => array( 'post', 'page' ),
+			'content_images'  => 1,
+			'featured_images' => 1,
 		);
 	}
 
@@ -79,6 +81,87 @@ final class Alt_Auto_Insert {
 	}
 
 	/**
+	 * Get the current editor post title.
+	 *
+	 * @return string
+	 */
+	private static function get_current_editor_title() {
+		$post_id = isset( $_REQUEST['post_id'] ) ? absint( $_REQUEST['post_id'] ) : 0;
+		if ( ! $post_id && isset( $_REQUEST['post'] ) ) {
+			$post_id = absint( $_REQUEST['post'] );
+		}
+		if ( ! $post_id ) {
+			$post_id = get_the_ID();
+		}
+
+		$title = $post_id ? get_the_title( $post_id ) : '';
+		return trim( wp_strip_all_tags( (string) $title ) );
+	}
+
+	/**
+	 * Load the lightweight Gutenberg helper only for enabled post types.
+	 */
+	public static function enqueue_block_editor_assets() {
+		$settings = self::get_settings();
+		if ( empty( $settings['content_images'] ) ) {
+			return;
+		}
+
+		$screen = function_exists( 'get_current_screen' ) ? get_current_screen() : null;
+		if ( ! $screen || empty( $screen->post_type ) || ! self::is_post_type_enabled( (string) $screen->post_type ) ) {
+			return;
+		}
+
+		wp_enqueue_script(
+			'alt-auto-insert-editor',
+			plugins_url( 'assets/editor-alt.js', __FILE__ ),
+			array( 'wp-compose', 'wp-data', 'wp-element', 'wp-hooks' ),
+			self::VERSION,
+			true
+		);
+	}
+
+	/**
+	 * Fill an empty alt immediately when Classic Editor inserts an image.
+	 * Existing non-empty alt values are never overwritten.
+	 *
+	 * @param string $html    Image HTML.
+	 * @param int    $id      Attachment ID.
+	 * @param string $caption Caption.
+	 * @param string $title   Attachment title.
+	 * @param string $align   Alignment.
+	 * @param string $url     Image URL.
+	 * @param string $size    Image size.
+	 * @param string $alt     Existing alt text.
+	 * @return string
+	 */
+	public static function filter_classic_editor_image( $html, $id, $caption, $title, $align, $url, $size, $alt ) {
+		unset( $id, $caption, $title, $align, $url, $size );
+
+		$settings = self::get_settings();
+		if ( empty( $settings['content_images'] ) || '' !== trim( (string) $alt ) ) {
+			return $html;
+		}
+
+		$post_type = '';
+		if ( isset( $_REQUEST['post_id'] ) ) {
+			$post_type = (string) get_post_type( absint( $_REQUEST['post_id'] ) );
+		} elseif ( isset( $_REQUEST['post'] ) ) {
+			$post_type = (string) get_post_type( absint( $_REQUEST['post'] ) );
+		}
+		if ( $post_type && ! self::is_post_type_enabled( $post_type ) ) {
+			return $html;
+		}
+
+		$post_title = self::get_current_editor_title();
+		if ( '' === $post_title ) {
+			return $html;
+		}
+
+		return self::fill_empty_alt_attributes( $html, $post_title );
+	}
+
+	/**
 	 * Fill missing or empty alt attributes in post content before it is stored.
 	 * Existing non-empty alt values are never overwritten.
 	 *
@@ -87,6 +170,7 @@ final class Alt_Auto_Insert {
 	 * @return array
 	 */
 	public static function filter_post_data( $data, $postarr ) {
+		unset( $postarr );
 		$settings = self::get_settings();
 
 		if ( empty( $settings['content_images'] ) ) {
@@ -291,7 +375,7 @@ final class Alt_Auto_Insert {
 	public static function render_content_images_field() {
 		$settings = self::get_settings();
 		printf(
-			'<label><input type="checkbox" name="%1$s[content_images]" value="1" %2$s> 投稿保存時、本文内の空altへ記事タイトルを設定する</label>',
+			'<label><input type="checkbox" name="%1$s[content_images]" value="1" %2$s> エディターで画像を挿入した時、空のaltへ記事タイトルを設定する</label><p class="description">Gutenbergとクラシックエディターに対応し、保存時にも空altを補完します。</p>',
 			esc_attr( self::OPTION_NAME ),
 			checked( ! empty( $settings['content_images'] ), true, false )
 		);
